@@ -101,13 +101,13 @@ func main() {
 
 		//worth remembering this is WSG84
 		globe, _ := jsonparser.GetString(line, "claims", "P625", "[0]", "mainsnak", "datavalue", "value", "globe")
-		lat, _ := jsonparser.GetString(line, "claims", "P625", "[0]", "mainsnak", "datavalue", "value", "latitude")
-		lon, _ := jsonparser.GetString(line, "claims", "P625", "[0]", "mainsnak", "datavalue", "value", "longitude")
+		lat, _ := jsonparser.GetFloat(line, "claims", "P625", "[0]", "mainsnak", "datavalue", "value", "latitude")
+		lon, _ := jsonparser.GetFloat(line, "claims", "P625", "[0]", "mainsnak", "datavalue", "value", "longitude")
 		locPrec, _ := jsonparser.GetInt(line, "claims", "P625", "[0]", "mainsnak", "datavalue", "value", "precision")
 		if globe != "http://www.wikidata.org/entity/Q2" {
 			//crazy we have to check this, wikidata is crazy
-			lat = ""
-			lon = ""
+			lat = 0
+			lon = 0
 			locPrec = 0
 		}
 
