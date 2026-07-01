@@ -1,0 +1,20 @@
+services:
+  db:
+    image: postgres:17-alpine
+    container_name: postgres_db
+    restart: no
+    environment:
+      POSTGRES_USER: louis
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: wd_timeline
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data2
+    shm_size: 128mb
+
+volumes:
+  pgdata:
+
+
+# our connection string is: "postgres://louis:password@localhost:5432/wd_timeline?sslmode=disable"

@@ -35,15 +35,15 @@ CREATE TABLE IF NOT EXISTS event_tags (
     tag_id BIGINT REFERENCES tags(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_events_timeline 
-ON events (is_bce, year_start, month_start, day_start);
+-- CREATE INDEX IF NOT EXISTS idx_events_timeline 
+-- ON events (is_bce, year_start, month_start, day_start);
 
-CREATE INDEX IF NOT EXISTS idx_events_ranking 
-ON events (view_priority DESC, importance DESC);
+-- CREATE INDEX IF NOT EXISTS idx_events_ranking 
+-- ON events (view_priority DESC, importance DESC);
 
-CREATE INDEX IF NOT EXISTS idx_events_geo 
-ON events (latitude, longitude) 
-WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
+-- CREATE INDEX IF NOT EXISTS idx_events_geo 
+-- ON events (latitude, longitude) 
+-- WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
 
-CREATE INDEX IF NOT EXISTS idx_event_tags_lookup 
-ON event_tags (tag_id, event_id);
+-- CREATE INDEX IF NOT EXISTS idx_event_tags_lookup 
+-- ON event_tags (tag_id, event_id);
