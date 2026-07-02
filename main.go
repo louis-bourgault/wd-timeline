@@ -338,19 +338,22 @@ func flushBatch(ctx context.Context, conn *pgx.Conn, eventChan <-chan EventStruc
 
 func flushBatchData(ctx context.Context, conn *pgx.Conn, rows [][]interface{}, tagRecordsList [][]TagRecord, wikiURLs []string) {
 	uniqueTags := make(map[TagRecord]struct{})
+	var qidSlice []string
 	for _, tagRecords := range tagRecordsList {
 		for _, tr := range tagRecords {
 			uniqueTags[tr] = struct{}{}
+			qidSlice = append(qidSlice, tr.QID)
 		}
 	}
 
-	for tr := range uniqueTags {
-		_, err := conn.Exec(ctx,
-			"INSERT INTO tags (name, wikidata_qid) VALUES (NULL, $1) ON CONFLICT (wikidata_qid) DO NOTHING",
-			tr.QID)
-		if err != nil {
-			fmt.Printf("Error inserting tag %s (%s): %v\n", tr.QID, tr.Property, err)
-		}
+	_, err := conn.Exec(ctx, `
+    	INSERT INTO tags (name, wikidata_qid)
+    	SELECT NULL, unnest($1::text[])
+    	ON CONFLICT (wikidata_qid) DO NOTHING
+	`, qidSlice)
+
+	if err != nil {
+		return
 	}
 
 	executeCopy(ctx, conn, rows)
@@ -360,22 +363,50 @@ func flushBatchData(ctx context.Context, conn *pgx.Conn, rows [][]interface{}, t
 	}
 
 	eventIDs := make(map[string]int64, len(wikiURLs))
-	for _, url := range wikiURLs {
+
+	//do it all at once
+	idRows, _ := conn.Query(ctx, "SELECT id, wiki_url from EVENTS where wiki_url = ANY($1::text[])", wikiURLs)
+	defer idRows.Close()
+	for idRows.Next() {
 		var id int64
-		err := conn.QueryRow(ctx, "SELECT id FROM events WHERE wiki_url = $1", url).Scan(&id)
+		var wiki_url string
+		err := idRows.Scan(&id, &wiki_url)
 		if err == nil {
-			eventIDs[url] = id
+			eventIDs[wiki_url] = id
 		}
+
 	}
 
 	tagIDs := make(map[string]int64, len(uniqueTags))
-	for tr := range uniqueTags {
-		var id int64
-		err := conn.QueryRow(ctx, "SELECT id FROM tags WHERE wikidata_qid = $1", tr.QID).Scan(&id)
-		if err == nil {
-			tagIDs[tr.QID] = id
+
+	var wantedTags []string
+	for _, tagRecords := range tagRecordsList {
+		for _, tr := range tagRecords {
+			uniqueTags[tr] = struct{}{}
+			qidSlice = append(qidSlice, tr.QID)
 		}
 	}
+
+	tagRows, _ := conn.Query(ctx, "SELECT id, wikidata_qid FROM tags where wikidata_qid = ANY($1::text[])", wantedTags)
+	defer idRows.Close()
+	for tagRows.Next() {
+		var id int64
+		var wikidata_qid string
+		err := idRows.Scan(&id, &wikidata_qid)
+		if err == nil {
+			tagIDs[wikidata_qid] = id
+		}
+
+	}
+
+	//n=1 slow
+	// for tr := range uniqueTags {
+	// 	var id int64
+	// 	err := conn.QueryRow(ctx, "SELECT id FROM tags WHERE wikidata_qid = $1", tr.QID).Scan(&id)
+	// 	if err == nil {
+	// 		tagIDs[tr.QID] = id
+	// 	}
+	// }
 
 	var etRows [][]interface{}
 	for i, tagRecords := range tagRecordsList {
