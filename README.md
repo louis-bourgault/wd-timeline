@@ -14,3 +14,6 @@ if you're doing too many, you don't wnat to be logging it all, so do something l
 we want to delete the container every run since there's no deduplication in the db
 
 ```docker compose down -v --remove-orphans```
+
+# AI disclosure
+This repository uses quite a lot more AI than other parts of the system like the frontend, partly because parsing wikidata and lookign up all its property types and specifications is not particularly fun. Model used: mostly Mimo-M2.7 and Deepseek V4 Flash with Opencode.
