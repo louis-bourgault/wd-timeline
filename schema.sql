@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS tags (
     id BIGSERIAL PRIMARY KEY,
-    name TEXT NOT NULL,
+    name TEXT,
     color TEXT,
     wikidata_qid TEXT UNIQUE
 );
@@ -24,6 +24,9 @@ CREATE TABLE IF NOT EXISTS events (
     precision INTEGER NOT NULL DEFAULT 11,
     is_bce BOOLEAN DEFAULT FALSE,
     date_display TEXT,
+    image_url TEXT,
+    end_date_display TEXT,
+    is_end_bce BOOLEAN DEFAULT FALSE,
     
     latitude REAL,
     longitude REAL
@@ -32,7 +35,8 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS event_tags (
     id BIGSERIAL PRIMARY KEY,
     event_id BIGINT REFERENCES events(id) ON DELETE CASCADE,
-    tag_id BIGINT REFERENCES tags(id) ON DELETE CASCADE
+    tag_id BIGINT REFERENCES tags(id) ON DELETE CASCADE,
+    wikidata_property TEXT
 );
 
 -- CREATE INDEX IF NOT EXISTS idx_events_timeline 
@@ -47,3 +51,4 @@ CREATE TABLE IF NOT EXISTS event_tags (
 
 -- CREATE INDEX IF NOT EXISTS idx_event_tags_lookup 
 -- ON event_tags (tag_id, event_id);
+

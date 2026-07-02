@@ -5,3 +5,12 @@
 This will download a few hundred mb of the wikidata stuff to play with for testing.
 
 ```go run main.go > test.log```
+
+if you're doing too many, you don't wnat to be logging it all, so do something like this. This is probably about as big as you want to test locally: this took about 10 seconds on my computer and i dont see why you'd need more 
+``` go run . > /dev/null```
+
+
+# Killing things!
+we want to delete the container every run since there's no deduplication in the db
+
+```docker compose down -v --remove-orphans```
