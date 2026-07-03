@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/buger/jsonparser"
 	"github.com/jackc/pgx/v5"
@@ -147,6 +148,7 @@ func main() {
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 1024*1024*1024)
 		var totalLines int64
+		start := time.Now()
 
 		for scanner.Scan() {
 			if linesRead >= int64(*numRead) {
@@ -308,6 +310,8 @@ func main() {
 			}
 			eventChannel <- event
 		}
+		elapsed := time.Since(start)
+		fmt.Println("FINISHED PROCESSING IN", elapsed, ".", "Out of", totalLines, "lines read, we found", linesRead, "useful lines")
 	}()
 
 	flushBatch(ctx, conn, eventChannel)
@@ -389,10 +393,14 @@ func flushBatchData(ctx context.Context, conn *pgx.Conn, rows [][]interface{}, t
     `, nameSlice, qidSlice)
 
 	if err != nil {
+		fmt.Printf("Error upserting tags: %v\n", err)
 		return
 	}
 
-	executeCopy(ctx, conn, rows)
+	if err := executeCopy(ctx, conn, rows); err != nil {
+		fmt.Printf("Error copying events: %v\n", err)
+		return
+	}
 
 	eventIDs := make(map[string]int64, len(wikiURLs))
 	idRows, err := conn.Query(ctx, "SELECT id, wiki_url FROM events WHERE wiki_url = ANY($1::text[])", wikiURLs)
@@ -423,14 +431,6 @@ func flushBatchData(ctx context.Context, conn *pgx.Conn, rows [][]interface{}, t
 			tagIDs[wikidata_qid] = id
 		}
 	}
-	//n=1 slow
-	// for tr := range uniqueTags {
-	// 	var id int64
-	// 	err := conn.QueryRow(ctx, "SELECT id FROM tags WHERE wikidata_qid = $1", tr.QID).Scan(&id)
-	// 	if err == nil {
-	// 		tagIDs[tr.QID] = id
-	// 	}
-	// }
 
 	var etRows [][]interface{}
 	for i, tagRecords := range tagRecordsList {
@@ -458,7 +458,7 @@ func flushBatchData(ctx context.Context, conn *pgx.Conn, rows [][]interface{}, t
 	}
 }
 
-func executeCopy(ctx context.Context, conn *pgx.Conn, rows [][]interface{}) {
+func executeCopy(ctx context.Context, conn *pgx.Conn, rows [][]interface{}) error {
 	targetColumns := []string{
 		"title", "description", "wiki_url", "image_url",
 		"year_start", "month_start", "day_start",
@@ -475,8 +475,9 @@ func executeCopy(ctx context.Context, conn *pgx.Conn, rows [][]interface{}) {
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
-		fmt.Printf("copy not working: %v\n", err)
+		return fmt.Errorf("copy events failed: %w", err)
 	}
+	return nil
 }
 
 func extractWikidataTime(line []byte, property string) (string, int64, error) {
