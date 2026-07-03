@@ -5,18 +5,17 @@ import (
 	"compress/gzip"
 	"context"
 	_ "embed"
+	"flag"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/buger/jsonparser"
 	"github.com/jackc/pgx/v5"
-)
-
-const (
-	filePath = "wikidata_sample.json.gz"
 )
 
 var propertiesForTagging = []string{"P31", "P361", "P17", "P276", "P131", "P1346", "P710", //respectively: instance of, part of, country, location, located in the administrative territorial entity, participant in, participant
@@ -90,15 +89,30 @@ type EventStruct struct {
 //go:embed schema.sql
 var schemaSQL string
 
+var (
+	labelCache   = make(map[string]string)
+	labelCacheMu sync.RWMutex
+)
+
 func main() {
+	filePath := flag.String("file", "-", "input file (uses stdin if by default)")
+	numRead := flag.Int("num", 100000000000000000, "number of useful lines to read before stopping")
+	//the numread default is stupidly large so that unless you specify it, we do the whole thing
+	flag.Parse()
 	ctx := context.Background()
 	connStr := "postgres://louis:password@localhost:5432/wd_timeline?sslmode=disable"
 	conn, err := pgx.Connect(ctx, connStr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Unable to connect to database: %v\n", err)
+		fmt.Fprintf(os.Stderr, "problem with db: %v\n", err)
 		os.Exit(1)
 	}
 	defer conn.Close(ctx)
+
+	_, err = conn.Exec(ctx, "SET synchronous_commit = off")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cant set synchronous_commit: %v\n", err)
+		os.Exit(1)
+	}
 
 	_, err = conn.Exec(ctx, schemaSQL)
 	if err != nil {
@@ -111,37 +125,52 @@ func main() {
 	go func() {
 		defer close(eventChannel)
 
-		file, err := os.Open(filePath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Unable to open file: %v\n", err)
-			os.Exit(1)
-		}
-		defer file.Close()
-
 		var linesRead int64
-
-		gz, err := gzip.NewReader(file)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Unable to create gzip reader: %v\n", err)
-			os.Exit(1)
+		var input io.Reader = os.Stdin
+		if *filePath != "-" { //for testing with the gz file
+			f, err := os.Open(*filePath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "prob with open file: %v\n", err)
+				os.Exit(1)
+			}
+			defer f.Close()
+			gz, err := gzip.NewReader(f)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "prob with gzip reader: %v\n", err)
+				os.Exit(1)
+			}
+			input = gz
 		}
-		defer gz.Close()
 
-		scanner := bufio.NewScanner(gz)
+		scanner := bufio.NewScanner(input) //pipe the data from pigz to it
 		//lines can be very big, a few mb
 		buf := make([]byte, 0, 64*1024)
 		scanner.Buffer(buf, 1024*1024*1024)
 		var totalLines int64
 
 		for scanner.Scan() {
-			if linesRead >= 100 {
-				fmt.Println("100 useful lines out of", totalLines, "lines read, stopping for now")
+			if linesRead >= int64(*numRead) {
 				break
-
 			}
 			totalLines++
 			line := scanner.Bytes()
 			line = []byte(strings.TrimSuffix(strings.TrimPrefix(string(line), "["), ","))
+
+			id, err := jsonparser.GetString(line, "id")
+			//we should save this somewhere, but for now we don't need it
+			if err != nil {
+				continue
+			}
+
+			title, err := jsonparser.GetString(line, "labels", "en", "value")
+			if err != nil {
+				continue
+			}
+			if id != "" && title != "" {
+				labelCacheMu.Lock()
+				labelCache[id] = title
+				labelCacheMu.Unlock()
+			}
 
 			var typeOf string
 			jsonparser.ArrayEach(line, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
@@ -153,16 +182,6 @@ func main() {
 				continue
 			}
 
-			_, err := jsonparser.GetString(line, "id")
-			//we should save this somewhere, but for now we don't need it
-			if err != nil {
-				continue
-			}
-
-			title, err := jsonparser.GetString(line, "labels", "en", "value")
-			if err != nil {
-				continue
-			}
 			desc, _ := jsonparser.GetString(line, "descriptions", "en", "value")
 
 			wikiUrl := ""
@@ -292,6 +311,7 @@ func main() {
 	}()
 
 	flushBatch(ctx, conn, eventChannel)
+	backfillMissingTagNames(ctx, conn)
 
 }
 
@@ -337,20 +357,36 @@ func flushBatch(ctx context.Context, conn *pgx.Conn, eventChan <-chan EventStruc
 }
 
 func flushBatchData(ctx context.Context, conn *pgx.Conn, rows [][]interface{}, tagRecordsList [][]TagRecord, wikiURLs []string) {
-	uniqueTags := make(map[TagRecord]struct{})
-	var qidSlice []string
+	uniqueQIDs := make(map[string]struct{})
 	for _, tagRecords := range tagRecordsList {
 		for _, tr := range tagRecords {
-			uniqueTags[tr] = struct{}{}
-			qidSlice = append(qidSlice, tr.QID)
+			uniqueQIDs[tr.QID] = struct{}{}
 		}
 	}
 
+	qidSlice := make([]string, 0, len(uniqueQIDs))
+	nameSlice := make([]string, 0, len(uniqueQIDs))
+
+	labelCacheMu.RLock()
+	for qid := range uniqueQIDs {
+		qidSlice = append(qidSlice, qid)
+		if name, ok := labelCache[qid]; ok {
+			nameSlice = append(nameSlice, name)
+		} else {
+			nameSlice = append(nameSlice, "") //we don't have this yet, can do it at the end
+		}
+	}
+
+	labelCacheMu.RUnlock()
+
 	_, err := conn.Exec(ctx, `
-    	INSERT INTO tags (name, wikidata_qid)
-    	SELECT NULL, unnest($1::text[])
-    	ON CONFLICT (wikidata_qid) DO NOTHING
-	`, qidSlice)
+        INSERT INTO tags (name, wikidata_qid)
+        SELECT NULLIF(d.name, ''), d.qid
+        FROM unnest($1::text[], $2::text[]) AS d(name, qid)
+        ON CONFLICT (wikidata_qid) DO UPDATE
+        SET name = EXCLUDED.name
+        WHERE tags.name IS NULL OR tags.name = ''
+    `, nameSlice, qidSlice)
 
 	if err != nil {
 		return
@@ -358,47 +394,35 @@ func flushBatchData(ctx context.Context, conn *pgx.Conn, rows [][]interface{}, t
 
 	executeCopy(ctx, conn, rows)
 
-	if len(uniqueTags) == 0 {
+	eventIDs := make(map[string]int64, len(wikiURLs))
+	idRows, err := conn.Query(ctx, "SELECT id, wiki_url FROM events WHERE wiki_url = ANY($1::text[])", wikiURLs)
+	if err != nil {
+		fmt.Printf("Error looking up event IDs: %v\n", err)
 		return
 	}
-
-	eventIDs := make(map[string]int64, len(wikiURLs))
-
-	//do it all at once
-	idRows, _ := conn.Query(ctx, "SELECT id, wiki_url from EVENTS where wiki_url = ANY($1::text[])", wikiURLs)
 	defer idRows.Close()
 	for idRows.Next() {
 		var id int64
 		var wiki_url string
-		err := idRows.Scan(&id, &wiki_url)
-		if err == nil {
+		if err := idRows.Scan(&id, &wiki_url); err == nil {
 			eventIDs[wiki_url] = id
 		}
-
 	}
 
-	tagIDs := make(map[string]int64, len(uniqueTags))
-
-	var wantedTags []string
-	for _, tagRecords := range tagRecordsList {
-		for _, tr := range tagRecords {
-			uniqueTags[tr] = struct{}{}
-			qidSlice = append(qidSlice, tr.QID)
-		}
+	tagIDs := make(map[string]int64, len(uniqueQIDs))
+	tagRows, err := conn.Query(ctx, "SELECT id, wikidata_qid FROM tags WHERE wikidata_qid = ANY($1::text[])", qidSlice)
+	if err != nil {
+		fmt.Printf("Error looking up tag IDs: %v\n", err)
+		return
 	}
-
-	tagRows, _ := conn.Query(ctx, "SELECT id, wikidata_qid FROM tags where wikidata_qid = ANY($1::text[])", wantedTags)
-	defer idRows.Close()
+	defer tagRows.Close()
 	for tagRows.Next() {
 		var id int64
 		var wikidata_qid string
-		err := idRows.Scan(&id, &wikidata_qid)
-		if err == nil {
+		if err := tagRows.Scan(&id, &wikidata_qid); err == nil {
 			tagIDs[wikidata_qid] = id
 		}
-
 	}
-
 	//n=1 slow
 	// for tr := range uniqueTags {
 	// 	var id int64
@@ -451,7 +475,7 @@ func executeCopy(ctx context.Context, conn *pgx.Conn, rows [][]interface{}) {
 		pgx.CopyFromRows(rows),
 	)
 	if err != nil {
-		fmt.Printf("Critical Error executing COPY pipeline operation: %v\n", err)
+		fmt.Printf("copy not working: %v\n", err)
 	}
 }
 
@@ -544,10 +568,55 @@ func ExtractTagRecords(line []byte) []TagRecord {
 		jsonparser.ArrayEach(propertyArray, func(value []byte, dataType jsonparser.ValueType, offset int, err error) {
 			qid, err := jsonparser.GetString(value, "mainsnak", "datavalue", "value", "id")
 			if err == nil && qid != "" {
-				tagRecords = append(tagRecords, TagRecord{Name: qid, Property: prop, QID: qid})
+				//make the tag empty
+				tagRecords = append(tagRecords, TagRecord{QID: qid, Property: prop})
 			}
 		})
 	}
 
 	return tagRecords
+}
+
+func backfillMissingTagNames(ctx context.Context, conn *pgx.Conn) {
+	//anything we didn't get before, check if we have it now
+	rows, err := conn.Query(ctx, "SELECT wikidata_qid FROM tags WHERE name IS NULL OR name = ''")
+	if err != nil {
+		fmt.Printf("Error finding unresolved tags: %v\n", err)
+		return
+	}
+	defer rows.Close()
+
+	var unresolvedQIDs []string
+	var resolvedNames []string
+
+	labelCacheMu.RLock()
+	for rows.Next() {
+		var qid string
+		if err := rows.Scan(&qid); err != nil {
+			continue
+		}
+		if name, ok := labelCache[qid]; ok {
+			unresolvedQIDs = append(unresolvedQIDs, qid)
+			resolvedNames = append(resolvedNames, name)
+		}
+	}
+	labelCacheMu.RUnlock()
+
+	if len(unresolvedQIDs) == 0 {
+		fmt.Println("No unresolved tags to backfill.")
+		return
+	}
+
+	_, err = conn.Exec(ctx, `
+        UPDATE tags
+        SET name = d.name
+        FROM unnest($1::text[], $2::text[]) AS d(qid, name)
+        WHERE tags.wikidata_qid = d.qid
+    `, unresolvedQIDs, resolvedNames)
+
+	if err != nil {
+		fmt.Printf("problem with backfilling %v\n", err)
+	} else {
+		fmt.Printf("we fixed up %d things!\n", len(unresolvedQIDs))
+	}
 }
